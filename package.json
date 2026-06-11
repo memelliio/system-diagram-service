@@ -1,0 +1,11 @@
+{
+  "name": "system-diagram-service",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.0.0"
+  }
+}
