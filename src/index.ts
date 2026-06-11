@@ -87,16 +87,22 @@ app.get("/", (c) => {
 // GET /vars — list all variables (owner-gated)
 app.get("/vars", ownerGate, async (c) => {
   try {
-    const variables = {
-      GROQ_API_KEY: { value: "***", type: "secret" },
-      GROQ_MODEL: { value: process.env.GROQ_MODEL || "mixtral-8x7b-32768", type: "string" },
-      DATABASE_URL: { value: "***", type: "secret" },
-      CONTEXT_URL: { value: process.env.CONTEXT_URL || "http://customer-context.railway.internal:3000", type: "string" },
-      RENDER_ENDPOINT: { value: process.env.RENDER_ENDPOINT || "http://render-api.railway.internal:3000", type: "string" },
-      OWNER_KEY: { value: "1604", type: "owner" },
-      OWNER_GATE_ENABLED: { value: "true", type: "boolean" }
-    };
-    return c.json({ variables, timestamp: new Date().toISOString() });
+    // DYNAMIC: output every variable, so any added var (endpoints, MASTER_SETTINGS) shows.
+    const HIDE = /^(PATH|HOME|HOSTNAME|PWD|SHLVL|TERM|LANG|LS_COLORS|NODE_|BUN_|npm_|RAILWAY_|NIXPACKS|SSL_CERT|_$)/i;
+    const SECRET = /(KEY|SECRET|PASSWORD|TOKEN|DATABASE_URL|PRIVATE)/i;
+    const variables: Record<string, any> = {};
+    for (const [k, val] of Object.entries(process.env)) {
+      if (k === "PORT" || HIDE.test(k)) continue;
+      const isSecret = SECRET.test(k);
+      let type = "string";
+      if (k === "OWNER_KEY") type = "owner";
+      else if (isSecret) type = "secret";
+      else if (val === "true" || val === "false") type = "boolean";
+      variables[k] = { value: isSecret ? "***" : (val ?? ""), type };
+    }
+    if (!variables.OWNER_KEY) variables.OWNER_KEY = { value: "1604", type: "owner" };
+    if (!variables.OWNER_GATE_ENABLED) variables.OWNER_GATE_ENABLED = { value: "true", type: "boolean" };
+    return c.json({ variables, count: Object.keys(variables).length, timestamp: new Date().toISOString() });
   } catch (error) {
     console.error("[SYSTEM-DIAGRAM] Error:", error);
     return c.json({ error: "Failed to fetch variables", details: error.message }, 500);
