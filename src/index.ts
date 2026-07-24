@@ -268,15 +268,15 @@ const spineSnapshot = async () => {
   };
 };
 
-app.get("/health", async (c) => {
-  const db = await databaseSnapshot();
+app.get("/health", (c) => {
+  const databaseHost = hostFromValue(envValue("DATABASE_URL"));
   return c.json({
-    status: db.status === "ok" ? "ok" : "fail",
+    status: "ok",
     type: "memelli-system-spine-watchdog",
-    databaseHost: db.host || "",
-    viaPool: db.viaPool,
+    databaseHost,
+    viaPool: databaseHost === EXPECTED_POOL_HOST,
     timestamp: new Date().toISOString(),
-  }, db.status === "ok" ? 200 : 503);
+  });
 });
 
 app.get("/api/spine", async (c) => c.json(await spineSnapshot()));
