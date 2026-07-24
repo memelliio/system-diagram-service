@@ -65,6 +65,40 @@ const classifyServiceName = (name: string, value: string) => {
   return "service";
 };
 
+const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+const activityAliases = (name: string, type: string) => {
+  const base = normalize(name);
+  const aliases = new Set([base, normalize(type)]);
+  if (type === "app") {
+    aliases.add("memelli");
+    aliases.add("infinityos");
+    aliases.add("nextjs");
+  }
+  if (type === "proof") {
+    aliases.add("proof");
+    aliases.add("memelli");
+    aliases.add("infinityos");
+  }
+  if (type === "playwright") aliases.add("playwright");
+  if (type === "livekit") aliases.add("livekit");
+  if (type === "freqtrade") aliases.add("freqtrade");
+  if (type === "spawn") aliases.add("spawn");
+  return [...aliases].filter(Boolean);
+};
+
+const hasNamedActivity = (activity: any[], name: string, type: string) => {
+  const aliases = activityAliases(name, type).filter((alias) => alias.length >= 4);
+  if (!aliases.length) return false;
+  return activity.some((row) => {
+    const appName = normalize(String(row.application_name || ""));
+    if (!appName || appName === "unnamed") return false;
+    return aliases.some((alias) => appName.includes(alias) || alias.includes(appName));
+  });
+};
+
+const canShowSpineTraffic = (type: string) => !["pgbouncer", "database"].includes(type);
+
 const healthPathFor = (name: string, url: string) => {
   const type = classifyServiceName(name, url);
   if (type === "app" || type === "proof") return "/api/version";
@@ -124,6 +158,22 @@ const urlTargets = () => {
     if (!/^https?:\/\//.test(value)) continue;
     if (SECRET.test(name) && !/(SERVICE|APP|PROOF|PLAYWRIGHT|LIVEKIT|FREQTRADE|URL|ENDPOINT)/i.test(name)) continue;
     targets.push({ name, url: value });
+  }
+  return targets.sort((a, b) => a.name.localeCompare(b.name));
+};
+
+const internalTargets = () => {
+  const targets: Array<{ name: string; type: string; target: string; monitoredBy: string }> = [];
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!value || ENV_HIDE.test(name)) continue;
+    const host = hostFromValue(value);
+    if (!host || !host.includes(".railway.internal")) continue;
+    targets.push({
+      name,
+      type: classifyServiceName(name, value),
+      target: host,
+      monitoredBy: value.startsWith("http") ? "http_probe" : "pg_stat_or_env",
+    });
   }
   return targets.sort((a, b) => a.name.localeCompare(b.name));
 };
@@ -242,6 +292,12 @@ const spineSnapshot = async () => {
         code: "service_probe_not_green",
         message: `${item.name} ${item.check} returned ${item.httpStatus ?? item.error ?? "no response"}`,
       });
+    } else if (canShowSpineTraffic(item.type) && !hasNamedActivity(db.activity || [], item.name, item.type)) {
+      violations.push({
+        level: "warn",
+        code: "service_idle_no_spine_activity",
+        message: `${item.name} is reachable but has no named pgbouncer activity; idle is a violation until the service emits continuous spine traffic with application_name.`,
+      });
     }
   }
 
@@ -258,6 +314,7 @@ const spineSnapshot = async () => {
     generatedAt: new Date().toISOString(),
     database: db,
     serviceProbes: probes,
+    internalTargets: internalTargets(),
     violations,
     env: {
       databaseHost: db.host || "",
@@ -344,6 +401,10 @@ app.get("/", (c) => {
         <h2>Service Probes</h2>
         <div id="probes"></div>
       </div>
+      <div class="card span-12">
+        <h2>Internal Targets</h2>
+        <div id="targets"></div>
+      </div>
       <div class="card span-6">
         <h2>Postgres Activity</h2>
         <div id="activity"></div>
@@ -377,6 +438,9 @@ app.get("/", (c) => {
 
       document.getElementById('probes').innerHTML = table(['status','name','type','target','check','http','ms'],
         data.serviceProbes.map(p => '<tr><td>' + dot(p.status) + esc(p.status) + '</td><td>' + esc(p.name) + '</td><td>' + esc(p.type) + '</td><td class="mono">' + esc(p.target) + '</td><td>' + esc(p.check) + '</td><td>' + esc(p.httpStatus ?? '-') + '</td><td>' + esc(p.latencyMs) + '</td></tr>'));
+
+      document.getElementById('targets').innerHTML = table(['name','type','target','monitor'],
+        (data.internalTargets || []).map(t => '<tr><td>' + esc(t.name) + '</td><td>' + esc(t.type) + '</td><td class="mono">' + esc(t.target) + '</td><td>' + esc(t.monitoredBy) + '</td></tr>'));
 
       document.getElementById('activity').innerHTML = table(['app','client','state','count'],
         (data.database.activity || []).map(a => '<tr><td>' + esc(a.application_name) + '</td><td>' + esc(a.client_addr) + '</td><td>' + esc(a.state) + '</td><td>' + esc(a.count) + '</td></tr>'));
