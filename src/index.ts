@@ -212,6 +212,41 @@ const databaseClient = () => {
   } as any);
 };
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const activitySnapshot = async (client: pg.Client) => {
+  const activity = await client.query(`
+    select
+      coalesce(nullif(application_name, ''), 'unnamed') as application_name,
+      coalesce(client_addr::text, 'local') as client_addr,
+      coalesce(state, 'unknown') as state,
+      count(*)::int as count
+    from pg_stat_activity
+    group by 1,2,3
+    order by count desc, application_name asc
+    limit 80
+  `);
+  return activity.rows;
+};
+
+const mergeActivitySnapshots = (snapshots: any[][]) => {
+  const merged = new Map<string, any>();
+  for (const rows of snapshots) {
+    for (const row of rows) {
+      const key = `${row.application_name}|${row.client_addr}|${row.state}`;
+      const existing = merged.get(key);
+      if (!existing || Number(row.count || 0) > Number(existing.count || 0)) {
+        merged.set(key, row);
+      }
+    }
+  }
+  return [...merged.values()].sort((a, b) => {
+    const countDiff = Number(b.count || 0) - Number(a.count || 0);
+    if (countDiff) return countDiff;
+    return String(a.application_name || "").localeCompare(String(b.application_name || ""));
+  }).slice(0, 80);
+};
+
 const databaseSnapshot = async () => {
   const host = hostFromValue(envValue("DATABASE_URL"));
   const viaPool = host === EXPECTED_POOL_HOST;
@@ -231,17 +266,12 @@ const databaseSnapshot = async () => {
   try {
     await client.connect();
     const now = await client.query("select now() as now, current_database() as database");
-    const activity = await client.query(`
-      select
-        coalesce(nullif(application_name, ''), 'unnamed') as application_name,
-        coalesce(client_addr::text, 'local') as client_addr,
-        coalesce(state, 'unknown') as state,
-        count(*)::int as count
-      from pg_stat_activity
-      group by 1,2,3
-      order by count desc, application_name asc
-      limit 40
-    `);
+    const activitySnapshots = [await activitySnapshot(client)];
+    await sleep(1200);
+    activitySnapshots.push(await activitySnapshot(client));
+    await sleep(1200);
+    activitySnapshots.push(await activitySnapshot(client));
+    const activity = mergeActivitySnapshots(activitySnapshots);
     const tables = await client.query(`
       select name, to_regclass(name) is not null as exists
       from (values
@@ -264,7 +294,7 @@ const databaseSnapshot = async () => {
       status: viaPool ? "ok" as SpineStatus : "fail" as SpineStatus,
       database: now.rows[0]?.database,
       observedAt: now.rows[0]?.now,
-      activity: activity.rows,
+      activity,
       tables: tables.rows,
     };
   } catch (error) {
