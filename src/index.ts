@@ -73,13 +73,11 @@ const activityAliases = (name: string, type: string) => {
   const base = normalize(name);
   const aliases = new Set([base, normalize(type)]);
   if (type === "app") {
-    aliases.add("memelli");
     aliases.add("infinityos");
     aliases.add("nextjs");
   }
   if (type === "proof") {
     aliases.add("proof");
-    aliases.add("memelli");
     aliases.add("infinityos");
   }
   if (type === "playwright") aliases.add("playwright");
@@ -95,6 +93,7 @@ const hasNamedActivity = (activity: any[], name: string, type: string) => {
   return activity.some((row) => {
     const appName = normalize(String(row.application_name || ""));
     if (!appName || appName === "unnamed") return false;
+    if (appName.includes("systemspinewatchdog")) return false;
     return aliases.some((alias) => appName.includes(alias) || alias.includes(appName));
   });
 };
