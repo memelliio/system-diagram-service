@@ -106,11 +106,12 @@ const hasNamedActivity = (activity: any[], name: string, type: string) => {
 
 const canShowSpineTraffic = (type: string) => !["pgbouncer", "database", "redis", "livekit"].includes(type);
 
-const healthPathFor = (name: string, url: string) => {
+const healthPathsFor = (name: string, url: string) => {
   const type = classifyServiceName(name, url);
-  if (type === "app" || type === "proof") return "/api/version";
-  if (type === "playwright") return "/health";
-  return "/";
+  if (type === "app" || type === "proof") return ["/api/version"];
+  if (type === "playwright") return ["/health"];
+  if (type === "media") return ["/health", "/__site_status", "/api/version", "/"];
+  return ["/"];
 };
 
 const withPath = (base: string, path: string) => {
@@ -126,36 +127,50 @@ const withPath = (base: string, path: string) => {
 
 const probe = async (name: string, baseUrl: string) => {
   const started = Date.now();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3500);
-  const path = healthPathFor(name, baseUrl);
-  const url = withPath(baseUrl, path);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timer);
-    const status: SpineStatus = res.ok ? "ok" : "warn";
-    return {
-      name,
-      type: classifyServiceName(name, baseUrl),
-      target: hostFromValue(baseUrl),
-      check: path,
-      httpStatus: res.status,
-      status,
-      latencyMs: Date.now() - started,
-    };
-  } catch (error) {
-    clearTimeout(timer);
-    return {
-      name,
-      type: classifyServiceName(name, baseUrl),
-      target: hostFromValue(baseUrl),
-      check: path,
-      httpStatus: null,
-      status: "fail" as SpineStatus,
-      latencyMs: Date.now() - started,
-      error: safeError(error),
-    };
+  const attempts: any[] = [];
+  for (const path of healthPathsFor(name, baseUrl)) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    const url = withPath(baseUrl, path);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      const status: SpineStatus = res.ok ? "ok" : "warn";
+      const attempt = {
+        check: path,
+        httpStatus: res.status,
+        status,
+        latencyMs: Date.now() - started,
+      };
+      attempts.push(attempt);
+      if (res.ok || path === "/") {
+        return {
+          name,
+          type: classifyServiceName(name, baseUrl),
+          target: hostFromValue(baseUrl),
+          attempts: attempts.length > 1 ? attempts : undefined,
+          ...attempt,
+        };
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      attempts.push({
+        check: path,
+        httpStatus: null,
+        status: "fail" as SpineStatus,
+        latencyMs: Date.now() - started,
+        error: safeError(error),
+      });
+    }
   }
+  const last = attempts[attempts.length - 1] || { check: "/", httpStatus: null, status: "fail" as SpineStatus, latencyMs: Date.now() - started };
+  return {
+    name,
+    type: classifyServiceName(name, baseUrl),
+    target: hostFromValue(baseUrl),
+    attempts,
+    ...last,
+  };
 };
 
 const urlTargets = () => {
