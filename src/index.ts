@@ -112,6 +112,13 @@ const hasNamedActivity = (activity: any[], name: string, type: string) => {
 
 const canShowSpineTraffic = (type: string) => !["pgbouncer", "database", "redis", "livekit"].includes(type);
 
+const requiresSpineActivity = (item: any) => {
+  if (!canShowSpineTraffic(item.type)) return false;
+  const target = String(item.target || "");
+  if (target.includes(".railway.internal")) return true;
+  return ["freqtrade", "playwright", "media"].includes(item.type);
+};
+
 const healthPathsFor = (name: string, url: string) => {
   const type = classifyServiceName(name, url);
   if (type === "app" || type === "proof") return ["/api/version"];
@@ -449,7 +456,7 @@ const spineSnapshot = async () => {
         code: "service_probe_not_green",
         message: `${item.name} ${item.check} returned ${item.httpStatus ?? item.error ?? "no response"}`,
       });
-    } else if (canShowSpineTraffic(item.type) && !hasNamedActivity(db.activity || [], item.name, item.type)) {
+    } else if (requiresSpineActivity(item) && !hasNamedActivity(db.activity || [], item.name, item.type)) {
       violations.push({
         level: "warn",
         code: "service_idle_no_spine_activity",
