@@ -174,14 +174,22 @@ const probe = async (name: string, baseUrl: string) => {
 };
 
 const urlTargets = () => {
-  const targets: Array<{ name: string; url: string }> = [];
+  const targets = new Map<string, { name: string; url: string; aliases: string[] }>();
   for (const [name, value] of Object.entries(process.env)) {
     if (!value || ENV_HIDE.test(name)) continue;
     if (!/^https?:\/\//.test(value)) continue;
     if (SECRET.test(name) && !/(SERVICE|APP|PROOF|PLAYWRIGHT|LIVEKIT|FREQTRADE|URL|ENDPOINT)/i.test(name)) continue;
-    targets.push({ name, url: value });
+    const host = hostFromValue(value);
+    const type = classifyServiceName(name, value);
+    const key = `${type}:${host || value}`;
+    const existing = targets.get(key);
+    if (existing) {
+      existing.aliases.push(name);
+    } else {
+      targets.set(key, { name, url: value, aliases: [name] });
+    }
   }
-  return targets.sort((a, b) => a.name.localeCompare(b.name));
+  return [...targets.values()].sort((a, b) => a.name.localeCompare(b.name));
 };
 
 const internalTargets = () => {
