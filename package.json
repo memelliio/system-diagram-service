@@ -6,6 +6,7 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
-    "hono": "^4.0.0"
+    "hono": "^4.0.0",
+    "pg": "^8.13.1"
   }
 }
