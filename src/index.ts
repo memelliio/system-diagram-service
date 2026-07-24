@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import pg from "pg";
+import { createClient } from "redis";
 
 const { Client } = pg;
 const app = new Hono();
@@ -60,6 +61,7 @@ const classifyServiceName = (name: string, value: string) => {
   if (clean.includes("freqtrade") || host.includes("freqtrade")) return "freqtrade";
   if (clean.includes("spawn") || host.includes("spawn")) return "spawn";
   if (clean.includes("pgbouncer") || host.includes("pgbouncer")) return "pgbouncer";
+  if (clean.includes("redis") || host.includes("redis")) return "redis";
   if (clean.includes("database") || clean.includes("postgres")) return "database";
   if (clean.includes("memelli") || host.includes("memelli")) return "app";
   return "service";
@@ -97,7 +99,7 @@ const hasNamedActivity = (activity: any[], name: string, type: string) => {
   });
 };
 
-const canShowSpineTraffic = (type: string) => !["pgbouncer", "database"].includes(type);
+const canShowSpineTraffic = (type: string) => !["pgbouncer", "database", "redis", "livekit"].includes(type);
 
 const healthPathFor = (name: string, url: string) => {
   const type = classifyServiceName(name, url);
@@ -264,9 +266,52 @@ const databaseSnapshot = async () => {
   }
 };
 
+const redisSnapshot = async () => {
+  const url = envValue("REDIS_URL");
+  const host = hostFromValue(url);
+  if (!url) {
+    return {
+      configured: false,
+      host,
+      status: "warn" as SpineStatus,
+      error: "REDIS_URL is missing",
+    };
+  }
+
+  const client = createClient({ url, socket: { connectTimeout: 3000 } });
+  try {
+    await client.connect();
+    const pong = await client.ping();
+    return {
+      configured: true,
+      host,
+      status: pong === "PONG" ? "ok" as SpineStatus : "warn" as SpineStatus,
+      response: pong,
+    };
+  } catch (error) {
+    return {
+      configured: true,
+      host,
+      status: "fail" as SpineStatus,
+      error: safeError(error),
+    };
+  } finally {
+    try {
+      await client.quit();
+    } catch {
+      try {
+        await client.disconnect();
+      } catch {
+        // no-op
+      }
+    }
+  }
+};
+
 const spineSnapshot = async () => {
-  const [db, probes] = await Promise.all([
+  const [db, redis, probes] = await Promise.all([
     databaseSnapshot(),
+    redisSnapshot(),
     Promise.all(urlTargets().map((target) => probe(target.name, target.url))),
   ]);
 
@@ -283,6 +328,13 @@ const spineSnapshot = async () => {
       level: "fail",
       code: "database_unreachable",
       message: db.error || "Database probe failed",
+    });
+  }
+  if (redis.status === "fail") {
+    violations.push({
+      level: "fail",
+      code: "redis_unreachable",
+      message: redis.error || "Redis probe failed",
     });
   }
   for (const item of probes) {
@@ -313,6 +365,7 @@ const spineSnapshot = async () => {
     expectedPoolHost: EXPECTED_POOL_HOST,
     generatedAt: new Date().toISOString(),
     database: db,
+    redis,
     serviceProbes: probes,
     internalTargets: internalTargets(),
     violations,
@@ -393,7 +446,11 @@ app.get("/", (c) => {
         <h2>Database Spine</h2>
         <div id="db"></div>
       </div>
-      <div class="card span-8">
+      <div class="card span-4">
+        <h2>Redis State Bus</h2>
+        <div id="redis"></div>
+      </div>
+      <div class="card span-4">
         <h2>Violations</h2>
         <div id="violations"></div>
       </div>
@@ -431,6 +488,11 @@ app.get("/", (c) => {
         row('Via pgbouncer', data.database.viaPool ? 'yes' : 'no') +
         row('Database', data.database.database || '-') +
         row('Generated', data.generatedAt);
+
+      document.getElementById('redis').innerHTML =
+        row('REDIS_URL host', data.redis.host || 'missing') +
+        row('Status', data.redis.status || 'missing') +
+        row('Response', data.redis.response || data.redis.error || '-');
 
       document.getElementById('violations').innerHTML = data.violations.length
         ? data.violations.map(v => '<div class="row"><span>' + dot(v.level) + esc(v.code) + '</span><code>' + esc(v.message) + '</code></div>').join('')
