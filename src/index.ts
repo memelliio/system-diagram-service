@@ -56,6 +56,7 @@ const classifyServiceName = (name: string, value: string) => {
   const clean = name.toLowerCase();
   const host = hostFromValue(value).toLowerCase();
   if (clean.includes("proof") || host.includes("proof")) return "proof";
+  if (clean.includes("media") || clean.includes("storage") || host.includes("media") || host.includes("storage")) return "media";
   if (clean.includes("playwright") || host.includes("playwright")) return "playwright";
   if (clean.includes("livekit") || host.includes("livekit")) return "livekit";
   if (clean.includes("freqtrade") || host.includes("freqtrade")) return "freqtrade";
@@ -81,6 +82,11 @@ const activityAliases = (name: string, type: string) => {
     aliases.add("infinityos");
   }
   if (type === "playwright") aliases.add("playwright");
+  if (type === "media") {
+    aliases.add("media");
+    aliases.add("storage");
+    aliases.add("mediastorage");
+  }
   if (type === "livekit") aliases.add("livekit");
   if (type === "freqtrade") aliases.add("freqtrade");
   if (type === "spawn") aliases.add("spawn");
