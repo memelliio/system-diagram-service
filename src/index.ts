@@ -9,6 +9,7 @@ type SpineStatus = "ok" | "warn" | "fail";
 
 const EXPECTED_POOL_HOST = "pgbouncer.railway.internal";
 const OWNER_KEY = process.env.OWNER_KEY || "1604";
+const SPINE_EVENTS_CHANNEL = process.env.SPINE_EVENTS_CHANNEL || "memelli:spine:events";
 const SECRET = /(KEY|SECRET|PASSWORD|TOKEN|DATABASE_URL|PRIVATE|DSN|URL)/i;
 const ENV_HIDE = /^(PATH|HOME|HOSTNAME|PWD|SHLVL|TERM|LANG|LS_COLORS|NODE_|BUN_|npm_|RAILWAY_|NIXPACKS|SSL_CERT|_$)/i;
 
@@ -75,11 +76,16 @@ const activityAliases = (name: string, type: string) => {
   const aliases = new Set([base, normalize(type)]);
   if (type === "app") {
     aliases.add("infinityos");
+    aliases.add("memelliinfinityos");
+    aliases.add("memelliioinfinityos");
+    aliases.add("memelliinfinityoswww");
     aliases.add("nextjs");
   }
   if (type === "proof") {
     aliases.add("proof");
     aliases.add("infinityos");
+    aliases.add("memelliinfinityos");
+    aliases.add("memelliioinfinityosproof");
   }
   if (type === "playwright") aliases.add("playwright");
   if (type === "media") {
@@ -366,6 +372,47 @@ const redisSnapshot = async () => {
   }
 };
 
+let lastViolationSignature = "";
+
+const publishSpineEvent = async (data: any) => {
+  const url = envValue("REDIS_URL");
+  if (!url) return;
+  const client = createClient({ url, socket: { connectTimeout: 3000 } });
+  try {
+    await client.connect();
+    const violationSignature = JSON.stringify(
+      (data.violations || []).map((v: any) => `${v.level}:${v.code}:${v.message}`).sort()
+    );
+    await client.publish(SPINE_EVENTS_CHANNEL, JSON.stringify({
+      type: "spine.snapshot",
+      generatedAt: data.generatedAt,
+      status: data.status,
+      payload: data,
+    }));
+    if (violationSignature !== lastViolationSignature) {
+      lastViolationSignature = violationSignature;
+      await client.publish(SPINE_EVENTS_CHANNEL, JSON.stringify({
+        type: "spine.violation_change",
+        generatedAt: data.generatedAt,
+        status: data.status,
+        violations: data.violations || [],
+      }));
+    }
+  } catch (error) {
+    console.error("[spine-watchdog] redis publish error", safeError(error));
+  } finally {
+    try {
+      await client.quit();
+    } catch {
+      try {
+        await client.disconnect();
+      } catch {
+        // no-op
+      }
+    }
+  }
+};
+
 const spineSnapshot = async () => {
   const [db, redis, probes] = await Promise.all([
     databaseSnapshot(),
@@ -417,7 +464,7 @@ const spineSnapshot = async () => {
       ? "warn"
       : "ok";
 
-  return {
+  const data = {
     service: "memelli-system-spine-watchdog",
     status: overall,
     expectedPoolHost: EXPECTED_POOL_HOST,
@@ -434,6 +481,8 @@ const spineSnapshot = async () => {
       serviceUrlCount: probes.length,
     },
   };
+  void publishSpineEvent(data);
+  return data;
 };
 
 app.get("/health", (c) => {
