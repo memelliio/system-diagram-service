@@ -234,6 +234,20 @@ const databaseClient = () => {
   } as any);
 };
 
+const pgbouncerAdminClient = () => {
+  const connectionString = envValue("DATABASE_URL");
+  if (!connectionString) return null;
+  const url = new URL(connectionString);
+  url.pathname = "/pgbouncer";
+  return new Client({
+    connectionString: url.toString(),
+    ssl: false,
+    application_name: "memelli-system-spine-watchdog-inspector",
+    connectionTimeoutMillis: 3000,
+    query_timeout: 5000,
+  } as any);
+};
+
 const SPINE_EVENT_CHANNEL = "var_changed";
 let residentSpineConnectedAt: string | null = null;
 let residentSpineLastEventAt: string | null = null;
@@ -293,6 +307,33 @@ const activitySnapshot = async (client: pg.Client) => {
   return activity.rows;
 };
 
+const pgbouncerClientSnapshot = async () => {
+  const client = pgbouncerAdminClient();
+  if (!client) throw new Error("DATABASE_URL is missing");
+  try {
+    await client.connect();
+    const result = await client.query("show clients");
+    const grouped = new Map<string, any>();
+    for (const row of result.rows) {
+      const applicationName = String(row.application_name || row.application || "").trim() || "unnamed";
+      const clientAddr = row.addr || row.client_addr || "unknown";
+      const state = row.state || "unknown";
+      const key = `${applicationName}|${clientAddr}|${state}`;
+      grouped.set(key, {
+        application_name: applicationName,
+        client_addr: clientAddr,
+        state,
+        count: Number(grouped.get(key)?.count || 0) + 1,
+      });
+    }
+    return [...grouped.values()].sort((a, b) =>
+      String(a.application_name).localeCompare(String(b.application_name))
+    );
+  } finally {
+    await client.end();
+  }
+};
+
 const databaseSnapshot = async () => {
   const host = hostFromValue(envValue("DATABASE_URL"));
   const viaPool = host === EXPECTED_POOL_HOST;
@@ -305,6 +346,8 @@ const databaseSnapshot = async () => {
       status: "fail" as SpineStatus,
       error: "DATABASE_URL is missing",
       activity: [],
+      clients: [],
+      clientError: "DATABASE_URL is missing",
       tables: [],
     };
   }
@@ -336,6 +379,8 @@ const databaseSnapshot = async () => {
       database: now.rows[0]?.database,
       observedAt: now.rows[0]?.now,
       activity,
+      clients: await pgbouncerClientSnapshot(),
+      clientError: null,
       tables: tables.rows,
     };
   } catch (error) {
@@ -346,6 +391,8 @@ const databaseSnapshot = async () => {
       status: "fail" as SpineStatus,
       error: safeError(error),
       activity: [],
+      clients: [],
+      clientError: null,
       tables: [],
     };
   } finally {
@@ -476,7 +523,7 @@ const spineSnapshot = async () => {
         code: "service_probe_not_green",
         message: `${item.name} ${item.check} returned ${item.httpStatus ?? item.error ?? "no response"}`,
       });
-    } else if (requiresSpineActivity(item) && !hasNamedActivity(db.activity || [], item.name, item.type)) {
+    } else if (requiresSpineActivity(item) && !hasNamedActivity(db.clients || [], item.name, item.type)) {
       violations.push({
         level: "warn",
         code: "service_idle_no_spine_activity",
@@ -620,10 +667,14 @@ app.get("/", (c) => {
         <div id="targets"></div>
       </div>
       <div class="card span-6">
-        <h2>Postgres Activity</h2>
-        <div id="activity"></div>
+        <h2>PgBouncer Clients</h2>
+        <div id="clients"></div>
       </div>
       <div class="card span-6">
+        <h2>Postgres Backends</h2>
+        <div id="activity"></div>
+      </div>
+      <div class="card span-12">
         <h2>Runtime Tables</h2>
         <div id="tables"></div>
       </div>
@@ -663,6 +714,11 @@ app.get("/", (c) => {
 
       document.getElementById('activity').innerHTML = table(['app','client','state','count'],
         (data.database.activity || []).map(a => '<tr><td>' + esc(a.application_name) + '</td><td>' + esc(a.client_addr) + '</td><td>' + esc(a.state) + '</td><td>' + esc(a.count) + '</td></tr>'));
+
+      document.getElementById('clients').innerHTML = data.database.clientError
+        ? row('PgBouncer client error', data.database.clientError)
+        : table(['app','client','state','count'],
+            (data.database.clients || []).map(a => '<tr><td>' + esc(a.application_name) + '</td><td>' + esc(a.client_addr) + '</td><td>' + esc(a.state) + '</td><td>' + esc(a.count) + '</td></tr>'));
 
       document.getElementById('tables').innerHTML = table(['table','exists'],
         (data.database.tables || []).map(t => '<tr><td class="mono">' + esc(t.name) + '</td><td>' + (t.exists ? dot('ok') + 'yes' : dot('warn') + 'no') + '</td></tr>'));
