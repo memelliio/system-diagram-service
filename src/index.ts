@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import pg from "pg";
 import { createClient } from "redis";
 
@@ -233,7 +234,49 @@ const databaseClient = () => {
   } as any);
 };
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const SPINE_EVENT_CHANNEL = "var_changed";
+let residentSpineConnectedAt: string | null = null;
+let residentSpineLastEventAt: string | null = null;
+const spineSubscribers = new Set<(data: any) => Promise<void>>();
+let spineBroadcastRunning = false;
+
+const broadcastSpineSnapshot = async () => {
+  if (spineBroadcastRunning || spineSubscribers.size === 0) return;
+  spineBroadcastRunning = true;
+  try {
+    const data = await spineSnapshot();
+    await Promise.allSettled([...spineSubscribers].map((send) => send(data)));
+  } finally {
+    spineBroadcastRunning = false;
+  }
+};
+
+const startResidentSpineConnection = async () => {
+  const client = databaseClient();
+  if (!client) {
+    throw new Error("DATABASE_URL is required for the resident Infinity Network spine connection");
+  }
+
+  await client.connect();
+  await client.query("set application_name to 'memelli-system-spine-watchdog'");
+  await client.query(`listen ${SPINE_EVENT_CHANNEL}`);
+  residentSpineConnectedAt = new Date().toISOString();
+
+  client.on("notification", () => {
+    residentSpineLastEventAt = new Date().toISOString();
+    void broadcastSpineSnapshot();
+  });
+  client.on("error", (error) => {
+    console.error("[SYSTEM-WATCHDOG] resident spine connection failed", safeError(error));
+    process.exit(1);
+  });
+  client.on("end", () => {
+    console.error("[SYSTEM-WATCHDOG] resident spine connection ended");
+    process.exit(1);
+  });
+
+  console.log(`[SYSTEM-WATCHDOG] resident spine listening on ${SPINE_EVENT_CHANNEL}`);
+};
 
 const activitySnapshot = async (client: pg.Client) => {
   const activity = await client.query(`
@@ -248,24 +291,6 @@ const activitySnapshot = async (client: pg.Client) => {
     limit 80
   `);
   return activity.rows;
-};
-
-const mergeActivitySnapshots = (snapshots: any[][]) => {
-  const merged = new Map<string, any>();
-  for (const rows of snapshots) {
-    for (const row of rows) {
-      const key = `${row.application_name}|${row.client_addr}|${row.state}`;
-      const existing = merged.get(key);
-      if (!existing || Number(row.count || 0) > Number(existing.count || 0)) {
-        merged.set(key, row);
-      }
-    }
-  }
-  return [...merged.values()].sort((a, b) => {
-    const countDiff = Number(b.count || 0) - Number(a.count || 0);
-    if (countDiff) return countDiff;
-    return String(a.application_name || "").localeCompare(String(b.application_name || ""));
-  }).slice(0, 80);
 };
 
 const databaseSnapshot = async () => {
@@ -287,12 +312,7 @@ const databaseSnapshot = async () => {
   try {
     await client.connect();
     const now = await client.query("select now() as now, current_database() as database");
-    const activitySnapshots = [await activitySnapshot(client)];
-    await sleep(1200);
-    activitySnapshots.push(await activitySnapshot(client));
-    await sleep(1200);
-    activitySnapshots.push(await activitySnapshot(client));
-    const activity = mergeActivitySnapshots(activitySnapshots);
+    const activity = await activitySnapshot(client);
     const tables = await client.query(`
       select name, to_regclass(name) is not null as exists
       from (values
@@ -495,15 +515,38 @@ const spineSnapshot = async () => {
 app.get("/health", (c) => {
   const databaseHost = hostFromValue(envValue("DATABASE_URL"));
   return c.json({
-    status: "ok",
+    status: residentSpineConnectedAt ? "ok" : "fail",
     type: "memelli-system-spine-watchdog",
     databaseHost,
     viaPool: databaseHost === EXPECTED_POOL_HOST,
+    residentSpine: {
+      applicationName: "memelli-system-spine-watchdog",
+      channel: SPINE_EVENT_CHANNEL,
+      connectedAt: residentSpineConnectedAt,
+      lastEventAt: residentSpineLastEventAt,
+    },
     timestamp: new Date().toISOString(),
-  });
+  }, residentSpineConnectedAt ? 200 : 503);
 });
 
 app.get("/api/spine", async (c) => c.json(await spineSnapshot()));
+app.get("/api/spine/events", (c) => streamSSE(c, async (stream) => {
+  const send = async (data: any) => {
+    await stream.writeSSE({
+      event: "spine",
+      data: JSON.stringify(data),
+    });
+  };
+  spineSubscribers.add(send);
+  try {
+    await send(await spineSnapshot());
+    await new Promise<void>((resolve) => {
+      c.req.raw.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  } finally {
+    spineSubscribers.delete(send);
+  }
+}));
 
 app.get("/", (c) => {
   const html = `<!DOCTYPE html>
@@ -624,12 +667,13 @@ app.get("/", (c) => {
       document.getElementById('tables').innerHTML = table(['table','exists'],
         (data.database.tables || []).map(t => '<tr><td class="mono">' + esc(t.name) + '</td><td>' + (t.exists ? dot('ok') + 'yes' : dot('warn') + 'no') + '</td></tr>'));
     };
-    const load = async () => {
-      const res = await fetch('/api/spine', { cache: 'no-store' });
-      paint(await res.json());
+    const events = new EventSource('/api/spine/events');
+    events.addEventListener('spine', (event) => paint(JSON.parse(event.data)));
+    events.onerror = () => {
+      const overall = document.getElementById('overall');
+      overall.className = 'badge warn';
+      overall.textContent = 'reconnecting';
     };
-    load();
-    setInterval(load, 15000);
   </script>
 </body>
 </html>`;
@@ -684,6 +728,7 @@ app.post("/var/:name", ownerGate, async (c) => {
 });
 
 const port = Number(process.env.PORT) || 3000;
+await startResidentSpineConnection();
 Bun.serve({
   hostname: "::",
   port,
